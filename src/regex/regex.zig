@@ -8,35 +8,34 @@ fn last(slice: anytype) callconv(.Inline) std.meta.Child(@TypeOf(slice)) {
     return slice[slice.len - 1];
 }
 
-// Memory management
-
-// Basic data structure
+// Generic types
 pub fn LinkNode(comptime T: type) type {
     return struct {
         const Self = @This();
 
-        val: T = undefined,
-        next: ?*Self = null,
         allocator: *Allocator,
+        val: T,
+        next: ?*Self,
 
-        pub fn init(allocator: *Allocator) !*Self {
-            var self = try allocator.create(Self);
-            self.*.allocator = allocator;
-            return self;
-        }
-
-        pub fn initWithVal(allocator: *Allocator, val: T) !*Self {
-            var self = try allocator.create(Self);
-            self.*.allocator = allocator;
-            self.*.val = val;
+        pub fn create(allocator: *Allocator, val: T) !*Self {
+            var self = try allocator.create(Self); // Allocator give you nothing but undefined!
+            self.* = Self{ .allocator = allocator, .val = val, .next = null };
             return self;
         }
 
         pub fn prepend(self: *Self, v: T) !*Self {
-            const ret = try Self.initWithVal(self.*.allocator, v);
+            assert(self.*.allocator != undefined);
+            const ret = try Self.create(self.*.allocator, v);
             ret.*.next = self;
 
             return ret;
+        }
+
+        pub fn deinit(self: *Self) !void {
+            if (self.*.next != null) {
+                try self.*.next.?.*.deinit();
+            }
+            try self.*.allocator.*.destroy(self);
         }
     };
 }
@@ -45,24 +44,30 @@ pub fn Pair(comptime T1: type, comptime T2: type) type {
     return struct {
         const Self = @This();
 
-        first: T1 = undefined,
-        second: T2 = undefined,
         allocator: *Allocator,
+        first: T1,
+        second: T2,
 
-        pub fn init(allocator: *Allocator) !*Self {
-            var self = try allocator.create(Self);
+        pub fn create(allocator: *Allocator, val1: T1, val2: T2) !*Self {
+            const self = try allocator.*.create(Self);
+            self.* = Self{ .allocator = allocator, .first = val1, .second = val2 };
             return self;
         }
 
-        pub fn initWithVal(allocator: *Allocator, val1: T1, val2: T2) !*Self {
-            var self = try allocator.create(Self);
-            self.*.first = val1;
-            self.*.second = val2;
-            return self;
+        pub fn deinit(self: *Self) void {
+            self.*.allocator.*.destroy(self);
         }
     };
 }
+test "Pair" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    const allocator = &gpa.allocator;
 
+    var pair = try Pair(i32, i32).create(allocator, 1, 1);
+    defer pair.deinit();
+}
+
+// Regex building
 const RegexOperator = enum {
     Union, // '|'
     Concatenation,
@@ -71,6 +76,15 @@ const RegexOperator = enum {
     Wildcard, // '.'
     Optional, // '?'
 };
+
+fn regexOperatorPriority(op: RegexOperator) callconv(.Inline) !u8 {
+    return switch (op) {
+        .Union => 0,
+        .Concatenation => 1,
+        else => unreachable,
+    };
+}
+
 const RegexElementTag = enum {
     Literal,
     Operator,
@@ -80,40 +94,55 @@ const RegexElement = union(RegexElementTag) {
     Operator: RegexOperator,
 };
 
-// Regex building
 const NodeMeta = struct {
     const Self = @This();
 
-    element: RegexElement = undefined,
-    size: usize = 0,
-    nullable: bool = false,
-    position: ?u32 = null,
-    childs: ?*LinkNode(*Self) = null,
-    father: ?*Self = null,
+    element: RegexElement,
+    position: ?u32,
 
-    first_position: std.ArrayList(Self) = undefined,
-    last_position: std.ArrayList(Self) = undefined,
+    size: usize,
+    nullable: bool,
+    childs: ?*LinkNode(*Self),
+    father: ?*Self,
 
-    pub fn init(allocator: *Allocator) !*Self {
+    first_position: std.ArrayList(Self),
+    last_position: std.ArrayList(Self),
+
+    allocator: *Allocator,
+
+    pub fn create(allocator: *Allocator, element: RegexElement, position: ?u32) !*Self {
         var self = try allocator.create(Self);
-        self.*.childs = try LinkNode(*Self).init(allocator);
+        self.* = NodeMeta{
+            .element = element,
+            .position = position,
+
+            .size = 0,
+            .nullable = false,
+            .childs = null,
+            .father = null,
+
+            .first_position = undefined,
+            .last_position = undefined,
+
+            .allocator = allocator,
+        };
         return self;
     }
-    pub fn initWithVal(allocator: *Allocator, element: RegexElement, position: ?u32) !*Self {
-        var self = try allocator.create(Self);
-        self.* = NodeMeta{ .element = element, .position = position };
-        self.*.childs = try LinkNode(*Self).init(allocator);
-        return self;
+
+    pub fn deinit(self: *Self) void {
+        self.*.allocator.destroy(self);
     }
 };
 
 fn prettyPrintTree(root: *NodeMeta, allocator: *Allocator) !void {
     // In zig, recursion call can't auto generate error sets, so I choose iteration.
     var stack = std.ArrayList(*Pair(*NodeMeta, u8)).init(allocator);
-    const root_tagged = try Pair(*NodeMeta, u8).initWithVal(allocator, root, 0);
+    defer stack.deinit();
+    const root_tagged = try Pair(*NodeMeta, u8).create(allocator, root, 0);
     try stack.append(root_tagged);
-    while (true) {
+    while (stack.items.len != 0) {
         const top = stack.pop();
+        defer top.*.deinit();
         const current = top.*.first;
         const indent = top.*.second;
         var i: u8 = 0;
@@ -123,18 +152,41 @@ fn prettyPrintTree(root: *NodeMeta, allocator: *Allocator) !void {
         try stdout.print("{} at {}\n", .{ current.*.element, current.*.position });
         var cur_child = current.*.childs;
         while (cur_child != null) : (cur_child = cur_child.?.*.next) {
-            const child = try Pair(*NodeMeta, u8).initWithVal(allocator, cur_child.?.*.val, indent + 1);
+            assert(cur_child.?.*.val != undefined);
+            const child = try Pair(*NodeMeta, u8).create(allocator, cur_child.?.*.val, indent + 1);
             try stack.append(child);
         }
     }
 }
 
-fn link(father: *NodeMeta, son: *NodeMeta) !void {
-    father.*.childs = try father.*.childs.?.*.prepend(son);
+fn deinitTree(root: *NodeMeta, allocator: *Allocator) !void {
+    // In zig, recursion call can't auto generate error sets, so I choose iteration.
+    var stack = std.ArrayList(*NodeMeta).init(allocator);
+    defer stack.deinit();
+    try stack.append(root);
+    while (stack.items.len != 0) {
+        const current = stack.pop();
+        defer current.*.deinit();
+        var cur_child = current.*.childs;
+        while (cur_child != null) : (cur_child = cur_child.?.*.next) {
+            assert(cur_child.?.*.val != undefined);
+            try stack.append(cur_child.?.*.val);
+        }
+    }
+}
+
+fn link(father: *NodeMeta, son: *NodeMeta) callconv(.Inline) !void {
+    //try stdout.print("Link {*}:{} -> {*}:{}\n", .{ father, father.*.element, son, son.*.element });
+    if (father.*.childs == null) {
+        father.*.childs = try LinkNode(*NodeMeta).create(father.*.allocator, son);
+    } else {
+        father.*.childs = try father.*.childs.?.*.prepend(son);
+    }
     son.*.father = father;
 }
 
-fn unlink(son: *NodeMeta) void {
+fn unlink(son: *NodeMeta) callconv(.Inline) !void {
+    //try stdout.print("Unlink {*}:{} -> {*}:{}\n", .{ son.*.father.?, son.*.father.?.*.element, son, son.*.element });
     var i = son.*.father.?.*.childs;
     var last_i: ?*LinkNode(*NodeMeta) = null;
     while (i != null) : ({
@@ -157,16 +209,17 @@ fn unlink(son: *NodeMeta) void {
 fn insertToFather(
     chain: *std.ArrayList(*NodeMeta),
     new_father: *NodeMeta,
-) !void {
-    const current = chain.pop();
-    try stdout.print("Insert into the father of: {}", .{current.*.element});
+    allocator: *Allocator,
+) callconv(.Inline) !void {
+    const current = chain.*.pop();
+    //try stdout.print("Insert into the father of: {}\n", .{current.*.element});
     const grandfather = current.*.father.?;
-    try chain.*.append(new_father);
-    try chain.*.append(current);
 
-    unlink(current);
+    try unlink(current);
     try link(grandfather, new_father);
     try link(new_father, current);
+
+    try chain.*.append(new_father);
 }
 
 fn insertReduce(
@@ -176,23 +229,44 @@ fn insertReduce(
     reduce_op: RegexOperator,
     allocator: *Allocator,
 ) !void {
-    const current = last(chain.items);
     const current_parenthesis = last(chain_parenthesis.items);
-    if (current == current_parenthesis) { //Comparing memory address
+    const priority_insert = try regexOperatorPriority(reduce_op);
+    while (true) {
+        const current = last(chain.items);
+        const father = current.*.father.?;
+        const priority_current = try regexOperatorPriority(father.*.element.Operator);
+        if (priority_insert < priority_current) {
+            _ = chain.*.pop();
+        } else {
+            break;
+        }
+    }
+    const current = last(chain.items);
+    if (current == current_parenthesis) {
+        assert(current.*.element.Operator == RegexOperator.Union);
         try link(current, new);
         try chain.*.append(new);
     } else {
-        if (current.*.father.?.*.element.Operator == reduce_op) {
+        const father = current.*.father.?;
+        const priority_current = try regexOperatorPriority(father.*.element.Operator);
+        if (priority_insert == priority_current) {
             try link(current.*.father.?, new);
-        } else {
-            const concat = try NodeMeta.initWithVal(allocator, RegexElement{ .Operator = reduce_op }, null);
-            try insertToFather(chain, concat);
-            concat.childs = try concat.childs.?.*.prepend(new);
+
+            _ = chain.pop();
+            try chain.append(new);
+        } else { // priority_insert > priority_current
+            const concat = try NodeMeta.create(allocator, RegexElement{ .Operator = reduce_op }, null);
+            try insertToFather(chain, concat, allocator);
+            try link(concat, new);
+            _ = chain.pop();
+            try chain.append(concat);
+            try chain.append(new);
         }
     }
 }
 
-fn parseRegexToTree(expression: []const u8, allocator: *Allocator) !*NodeMeta { //Only supports ASCII.
+fn parseRegexToTree(expression: []const u8, allocator: *Allocator) !*NodeMeta {
+    // Only supports ASCII. Since I use Link List to store childs, they are inserted in the reversed order.
     // Track some key chains
     var chain = std.ArrayList(*NodeMeta).init(allocator);
     defer chain.deinit();
@@ -204,7 +278,7 @@ fn parseRegexToTree(expression: []const u8, allocator: *Allocator) !*NodeMeta { 
     var pos: u32 = 0;
 
     // Track some key nodes
-    var root = try NodeMeta.initWithVal(allocator, RegexElement{ .Operator = RegexOperator.Union }, null);
+    var root = try NodeMeta.create(allocator, RegexElement{ .Operator = RegexOperator.Union }, null);
 
     var escaped = false;
     var in_charset = false;
@@ -216,9 +290,9 @@ fn parseRegexToTree(expression: []const u8, allocator: *Allocator) !*NodeMeta { 
     try chain_parenthesis.append(root);
 
     for (expression) |char| {
-        try stdout.print("Reading char: {c}\n", .{char});
+        //try stdout.print("Reading char: {c}\n", .{char});
         if (escaped) {
-            const literal = try NodeMeta.initWithVal(allocator, RegexElement{ .Literal = char }, pos);
+            const literal = try NodeMeta.create(allocator, RegexElement{ .Literal = char }, pos);
             pos += 1;
             try insertReduce(
                 &chain,
@@ -237,7 +311,7 @@ fn parseRegexToTree(expression: []const u8, allocator: *Allocator) !*NodeMeta { 
                     if (last_in_charset != null) {
                         on_range = true;
                     } else {
-                        const literal = try NodeMeta.initWithVal(allocator, RegexElement{ .Literal = char }, pos);
+                        const literal = try NodeMeta.create(allocator, RegexElement{ .Literal = char }, pos);
                         pos += 1;
                         try insertReduce(
                             &chain,
@@ -257,7 +331,7 @@ fn parseRegexToTree(expression: []const u8, allocator: *Allocator) !*NodeMeta { 
                         last_in_charset = undefined;
 
                         while (i <= char) : (i += 1) {
-                            const literal = try NodeMeta.initWithVal(allocator, RegexElement{ .Literal = i }, pos);
+                            const literal = try NodeMeta.create(allocator, RegexElement{ .Literal = i }, pos);
                             pos += 1;
                             try insertReduce(
                                 &chain,
@@ -268,7 +342,7 @@ fn parseRegexToTree(expression: []const u8, allocator: *Allocator) !*NodeMeta { 
                             );
                         }
                     } else {
-                        const literal = try NodeMeta.initWithVal(allocator, RegexElement{ .Literal = char }, pos);
+                        const literal = try NodeMeta.create(allocator, RegexElement{ .Literal = char }, pos);
                         pos += 1;
                         try insertReduce(
                             &chain,
@@ -289,7 +363,7 @@ fn parseRegexToTree(expression: []const u8, allocator: *Allocator) !*NodeMeta { 
                     escaped = true;
                 },
                 '(' => {
-                    const new_layer = try NodeMeta.initWithVal(allocator, RegexElement{ .Operator = RegexOperator.Union }, null);
+                    const new_layer = try NodeMeta.create(allocator, RegexElement{ .Operator = RegexOperator.Union }, null);
 
                     try link(last(chain.items), new_layer);
 
@@ -307,30 +381,23 @@ fn parseRegexToTree(expression: []const u8, allocator: *Allocator) !*NodeMeta { 
                 },
                 '*' => {
                     assert(current != current_parenthesis);
-                    const kleene = try NodeMeta.initWithVal(allocator, RegexElement{ .Operator = RegexOperator.KleeneClosure }, null);
-                    try insertToFather(
-                        &chain,
-                        kleene,
-                    );
+                    const kleene = try NodeMeta.create(allocator, RegexElement{ .Operator = RegexOperator.KleeneClosure }, null);
+                    //try stdout.print("Saaaaafffffeeee hereererere!\n", .{});
+                    try insertToFather(&chain, kleene, allocator);
+                    //try stdout.print("Saaaaafffffeeee hereererere!\n", .{});
                 },
                 '+' => {
                     assert(current != current_parenthesis);
-                    const positive = try NodeMeta.initWithVal(allocator, RegexElement{ .Operator = RegexOperator.PositiveClosure }, null);
-                    try insertToFather(
-                        &chain,
-                        positive,
-                    );
+                    const positive = try NodeMeta.create(allocator, RegexElement{ .Operator = RegexOperator.PositiveClosure }, null);
+                    try insertToFather(&chain, positive, allocator);
                 },
                 '?' => {
                     assert(current != current_parenthesis);
-                    const optional = try NodeMeta.initWithVal(allocator, RegexElement{ .Operator = RegexOperator.Optional }, null);
-                    try insertToFather(
-                        &chain,
-                        optional,
-                    );
+                    const optional = try NodeMeta.create(allocator, RegexElement{ .Operator = RegexOperator.Optional }, null);
+                    try insertToFather(&chain, optional, allocator);
                 },
                 '.' => {
-                    const wildcard = try NodeMeta.initWithVal(allocator, RegexElement{ .Operator = RegexOperator.Wildcard }, pos);
+                    const wildcard = try NodeMeta.create(allocator, RegexElement{ .Operator = RegexOperator.Wildcard }, pos);
                     pos += 1;
                     try insertReduce(
                         &chain,
@@ -341,7 +408,7 @@ fn parseRegexToTree(expression: []const u8, allocator: *Allocator) !*NodeMeta { 
                     );
                 },
                 else => {
-                    const literal = try NodeMeta.initWithVal(allocator, RegexElement{ .Literal = char }, pos);
+                    const literal = try NodeMeta.create(allocator, RegexElement{ .Literal = char }, pos);
                     pos += 1;
                     try insertReduce(
                         &chain,
@@ -365,4 +432,5 @@ test "Build up tree for regex" {
     const t = try parseRegexToTree("(a|b)*ab", allocator);
     try stdout.print("Tree built!\n", .{});
     try prettyPrintTree(t, allocator);
+    try deinitTree(t, allocator);
 }
