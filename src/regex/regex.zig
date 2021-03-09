@@ -205,7 +205,6 @@ fn link(father: *NodeMeta, son: *NodeMeta) callconv(.Inline) !void {
 }
 
 test "Link and Free" {
-    //try stdout.print("\n", .{});
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = &gpa.allocator;
@@ -215,11 +214,9 @@ test "Link and Free" {
     defer b.*.deinit();
     try link(a, b);
     a.*.childs.?.*.deinit();
-    //try stdout.print("{*}:{}\n", .{ b, b.*.element });
 }
 
 fn unlink(son: *NodeMeta) callconv(.Inline) !void {
-    //try stdout.print("Unlink {*}:{} -> {*}:{}\n", .{ son.*.father.?, son.*.father.?.*.element, son, son.*.element });
     var i = son.*.father.?.*.childs;
     var last_i: ?*LinkNode(*NodeMeta) = null;
     while (i != null) : ({
@@ -240,66 +237,131 @@ fn unlink(son: *NodeMeta) callconv(.Inline) !void {
     unreachable;
 }
 
-fn insertToFather(
+fn unlink_all(father: *NodeMeta) callconv(.Inline) void {
+    var i = father.*.childs;
+    var last_i: ?*LinkNode(*NodeMeta) = null;
+    while (i != null) : ({
+        last_i = i;
+        i = i.?.*.next;
+    }) {
+        if (last_i != null) {
+            last_i.?.*.deinit();
+        }
+        const son = i.?.*.val;
+        son.*.father = null;
+    }
+    if (last_i != null) {
+        last_i.?.*.deinit();
+    }
+    father.*.childs = null;
+}
+fn insertToFatherSingle(
     chain: *std.ArrayList(*NodeMeta),
+    last_node: *?*NodeMeta,
     new_father: *NodeMeta,
     allocator: *Allocator,
 ) callconv(.Inline) !void {
-    const current = chain.*.pop();
-    //try stdout.print("Insert into the father of: {}\n", .{current.*.element});
-    const grandfather = current.*.father.?;
+    assert(last_node.* != null);
 
-    try unlink(current);
-    try link(grandfather, new_father);
-    try link(new_father, current);
+    const old_father = last(chain.*.items);
 
-    try chain.*.append(new_father);
+    try unlink(last_node.*.?);
+    try link(old_father, new_father);
+    try link(new_father, last_node.*.?);
+
+    last_node.* = new_father;
 }
 
-fn insertReduce(
+fn insertToFather(
+    chain: *std.ArrayList(*NodeMeta),
+    last_node: *?*NodeMeta,
+    new_father: *NodeMeta,
+    allocator: *Allocator,
+) callconv(.Inline) !void {
+    assert(last_node.* != null);
+
+    const old_father = last(chain.*.items);
+    var i = old_father.*.childs;
+    var stack = std.ArrayList(*NodeMeta).init(allocator);
+    defer stack.deinit();
+    while (i != null) : ({
+        i = i.?.*.next;
+    }) {
+        try stack.append(i.?.*.val);
+    }
+    unlink_all(old_father);
+    try link(old_father, new_father);
+    for (stack.items) |j| {
+        try link(new_father, j);
+    }
+
+    last_node.* = new_father;
+}
+
+fn insertBinaryOperator(
     chain: *std.ArrayList(*NodeMeta),
     chain_parenthesis: *std.ArrayList(*NodeMeta),
+    last_node: *?*NodeMeta,
     new: *NodeMeta,
     reduce_op: RegexOperator,
     allocator: *Allocator,
 ) !void {
     const current_parenthesis = last(chain_parenthesis.items);
     const priority_insert = try regexOperatorPriority(reduce_op);
-    while (chain.*.items.len > 1) {
-        const current = last(chain.*.items);
-        const father = current.*.father.?;
-        const priority_current = try regexOperatorPriority(father.*.element.Operator);
-        if (priority_insert < priority_current) {
-            _ = chain.*.pop();
-        } else {
+    var current = last(chain.*.items);
+    var priority_current: u8 = undefined;
+    while (chain.*.items.len > 1) : ({
+        last_node.* = chain.*.pop();
+        current = last(chain.*.items);
+    }) {
+        priority_current = try regexOperatorPriority(current.*.element.Operator);
+        if (priority_insert >= priority_current) {
             break;
         }
     }
-    const current = last(chain.items);
-    if (current == current_parenthesis) {
+    if (last_node.* == null) {
         assert(current.*.element.Operator == RegexOperator.Union);
-        try link(current, new);
-        try chain.*.append(new);
-    } else {
-        const father = current.*.father.?;
-        const priority_current = try regexOperatorPriority(father.*.element.Operator);
-        if (priority_insert == priority_current) {
-            try link(current.*.father.?, new);
-
-            _ = chain.pop();
-            try chain.append(new);
-        } else { // priority_insert > priority_current
+        if (reduce_op == RegexOperator.Union) {
+            try link(current, new);
+        } else {
             const concat = try NodeMeta.create(allocator, RegexElement{ .Operator = reduce_op }, null);
-            try insertToFather(chain, concat, allocator);
+            try link(current, concat);
             try link(concat, new);
-            _ = chain.pop();
-            try chain.append(concat);
-            try chain.append(new);
+            try chain.*.append(concat);
+        }
+    } else {
+        if (priority_insert == priority_current) {
+            try link(current, new);
+        } else {
+            const concat = try NodeMeta.create(allocator, RegexElement{ .Operator = reduce_op }, null);
+            //try chain.*.append(last_node);
+            try insertToFather(chain, last_node, concat, allocator);
+            try link(concat, new);
+            //_ = chain.pop();
+            //try chain.append(concat);
         }
     }
+    last_node.* = new;
+}
+
+fn insertUnaryOperator(chain: *std.ArrayList(*NodeMeta), op: RegexOperator, last_node: *?*NodeMeta, allocator: *Allocator) !void {
+
+    // chain: *std.ArrayList(*NodeMeta),
+    // last_node: *?*NodeMeta,
+    // new_father: *NodeMeta,
+    // allocator: *Allocator,
+    //
+    assert(last_node.* != null);
+    const op_element = try NodeMeta.create(allocator, RegexElement{ .Operator = op }, null);
+    //last_node.* = null;
+
+    //try chain.*.append(last_node.*.?);
+    try insertToFatherSingle(chain, last_node, op_element, allocator);
+    //last_node.* = op_element;
 }
 
 fn parseRegexToTree(expression: []const u8, allocator: *Allocator) !*NodeMeta {
+    try stdout.print("Building tree for regex: \"{s}\"...\n", .{expression});
     // Only supports ASCII. Since I use Link List to store childs, they are inserted in the reversed order.
     // Track some key chains
     var chain = std.ArrayList(*NodeMeta).init(allocator);
@@ -313,6 +375,7 @@ fn parseRegexToTree(expression: []const u8, allocator: *Allocator) !*NodeMeta {
 
     // Track some key nodes
     var root = try NodeMeta.create(allocator, RegexElement{ .Operator = RegexOperator.Union }, null);
+    var last_node: ?*NodeMeta = null;
 
     var escaped = false;
     var in_charset = false;
@@ -328,9 +391,10 @@ fn parseRegexToTree(expression: []const u8, allocator: *Allocator) !*NodeMeta {
         if (escaped) {
             const literal = try NodeMeta.create(allocator, RegexElement{ .Literal = char }, pos);
             pos += 1;
-            try insertReduce(
+            try insertBinaryOperator(
                 &chain,
                 &chain_parenthesis,
+                &last_node,
                 literal,
                 if (in_charset) RegexOperator.Union else RegexOperator.Concatenation,
                 allocator,
@@ -342,20 +406,45 @@ fn parseRegexToTree(expression: []const u8, allocator: *Allocator) !*NodeMeta {
                     escaped = true;
                 },
                 '-' => {
-                    if (last_in_charset != null) {
+                    if (last_in_charset != null and !on_range) {
                         on_range = true;
                     } else {
                         const literal = try NodeMeta.create(allocator, RegexElement{ .Literal = char }, pos);
                         pos += 1;
-                        try insertReduce(
+                        try insertBinaryOperator(
                             &chain,
                             &chain_parenthesis,
+                            &last_node,
                             literal,
                             RegexOperator.Union,
                             allocator,
                         );
                         last_in_charset = '-';
                     }
+                },
+                ']' => {
+                    //assert(on_range == false);
+                    if (on_range) {
+                        const literal = try NodeMeta.create(allocator, RegexElement{ .Literal = '-' }, pos);
+                        pos += 1;
+                        try insertBinaryOperator(
+                            &chain,
+                            &chain_parenthesis,
+                            &last_node,
+                            literal,
+                            RegexOperator.Union,
+                            allocator,
+                        );
+                        last_in_charset = '-';
+                    }
+
+                    //unreachable; //FIXME
+                    const parenthesis_to_exit = chain_parenthesis.pop();
+                    while (chain.pop() != parenthesis_to_exit) {}
+                    last_node = parenthesis_to_exit;
+                    //try chain.append(parenthesis_to_exit);
+
+                    in_charset = false;
                 },
                 else => {
                     if (on_range) {
@@ -364,23 +453,28 @@ fn parseRegexToTree(expression: []const u8, allocator: *Allocator) !*NodeMeta {
                         on_range = false;
                         last_in_charset = undefined;
 
+                        assert(i < char);
                         while (i <= char) : (i += 1) {
+                            try stdout.print("In charset: {c}\n", .{i});
                             const literal = try NodeMeta.create(allocator, RegexElement{ .Literal = i }, pos);
                             pos += 1;
-                            try insertReduce(
+                            try insertBinaryOperator(
                                 &chain,
                                 &chain_parenthesis,
+                                &last_node,
                                 literal,
                                 RegexOperator.Union,
                                 allocator,
                             );
                         }
                     } else {
+                        try stdout.print("In charset: {c}\n", .{char});
                         const literal = try NodeMeta.create(allocator, RegexElement{ .Literal = char }, pos);
                         pos += 1;
-                        try insertReduce(
+                        try insertBinaryOperator(
                             &chain,
                             &chain_parenthesis,
+                            &last_node,
                             literal,
                             RegexOperator.Union,
                             allocator,
@@ -399,54 +493,80 @@ fn parseRegexToTree(expression: []const u8, allocator: *Allocator) !*NodeMeta {
                 '(' => {
                     const new_layer = try NodeMeta.create(allocator, RegexElement{ .Operator = RegexOperator.Union }, null);
 
-                    try link(last(chain.items), new_layer);
+                    try insertBinaryOperator(
+                        &chain,
+                        &chain_parenthesis,
+                        &last_node,
+                        new_layer,
+                        RegexOperator.Concatenation,
+                        allocator,
+                    );
+                    last_node = null;
 
+                    //try link(last(chain.items), new_layer);
                     try chain.append(new_layer);
                     try chain_parenthesis.append(new_layer);
                 },
                 ')' => {
+                    //unreachable; //FIXME
                     const parenthesis_to_exit = chain_parenthesis.pop();
                     while (chain.pop() != parenthesis_to_exit) {}
-                    try chain.append(parenthesis_to_exit);
+                    last_node = parenthesis_to_exit;
+                    //try chain.append(parenthesis_to_exit);
                 },
                 '|' => {
                     while (last(chain.items) != current_parenthesis)
                         _ = chain.pop();
+                    last_node = null;
                 },
                 '*' => {
-                    assert(current != current_parenthesis);
-                    const kleene = try NodeMeta.create(allocator, RegexElement{ .Operator = RegexOperator.KleeneClosure }, null);
-                    //try stdout.print("Saaaaafffffeeee hereererere!\n", .{});
-                    try insertToFather(&chain, kleene, allocator);
-                    //try stdout.print("Saaaaafffffeeee hereererere!\n", .{});
+                    try insertUnaryOperator(&chain, RegexOperator.KleeneClosure, &last_node, allocator);
                 },
                 '+' => {
-                    assert(current != current_parenthesis);
-                    const positive = try NodeMeta.create(allocator, RegexElement{ .Operator = RegexOperator.PositiveClosure }, null);
-                    try insertToFather(&chain, positive, allocator);
+                    try insertUnaryOperator(&chain, RegexOperator.PositiveClosure, &last_node, allocator);
                 },
                 '?' => {
-                    assert(current != current_parenthesis);
-                    const optional = try NodeMeta.create(allocator, RegexElement{ .Operator = RegexOperator.Optional }, null);
-                    try insertToFather(&chain, optional, allocator);
+                    try insertUnaryOperator(&chain, RegexOperator.Optional, &last_node, allocator);
                 },
                 '.' => {
                     const wildcard = try NodeMeta.create(allocator, RegexElement{ .Operator = RegexOperator.Wildcard }, pos);
                     pos += 1;
-                    try insertReduce(
+                    try insertBinaryOperator(
                         &chain,
                         &chain_parenthesis,
+                        &last_node,
                         wildcard,
                         RegexOperator.Concatenation,
                         allocator,
                     );
+                    last_node = wildcard;
+                },
+                '[' => {
+                    const new_layer = try NodeMeta.create(allocator, RegexElement{ .Operator = RegexOperator.Union }, null);
+
+                    try insertBinaryOperator(
+                        &chain,
+                        &chain_parenthesis,
+                        &last_node,
+                        new_layer,
+                        RegexOperator.Concatenation,
+                        allocator,
+                    );
+                    last_node = null;
+
+                    //try link(last(chain.items), new_layer);
+                    try chain.append(new_layer);
+                    try chain_parenthesis.append(new_layer);
+
+                    in_charset = true;
                 },
                 else => {
                     const literal = try NodeMeta.create(allocator, RegexElement{ .Literal = char }, pos);
                     pos += 1;
-                    try insertReduce(
+                    try insertBinaryOperator(
                         &chain,
                         &chain_parenthesis,
+                        &last_node,
                         literal,
                         RegexOperator.Concatenation,
                         allocator,
@@ -456,16 +576,19 @@ fn parseRegexToTree(expression: []const u8, allocator: *Allocator) !*NodeMeta {
         }
     }
     assert(!escaped and !in_charset);
+    try stdout.print("Tree built!\n", .{});
     return root;
 }
 test "Build up tree for regex" {
+    try stdout.print("\n", .{});
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     const allocator = &gpa.allocator;
     defer _ = gpa.deinit();
-    try stdout.print("\nStart building tree...\n", .{});
-    //const t = try parseRegexToTree("b", allocator);
-    const t = try parseRegexToTree("[a-z]((a|b)*ab.)+", allocator);
-    try stdout.print("Tree built!\n", .{});
+    //try stdout.print("\nStart building tree...\n", .{});
+    const t = try parseRegexToTree("\\[\\](a|b)+x([0-9+-]yz(cd)?)+", allocator);
+    //try dpTree(t);
+    //const t = try parseRegexToTree("()*", allocator);
+    //try stdout.print("Tree built!\n", .{});
     try prettyPrintTree(t, allocator);
     try deinitTree(t, allocator);
 }
