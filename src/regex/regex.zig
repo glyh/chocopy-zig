@@ -20,6 +20,7 @@ pub fn LinkNode(comptime T: type) type {
         pub fn create(allocator: *Allocator, val: T) !*Self {
             var self = try allocator.create(Self); // Allocator give you nothing but undefined!
             self.* = Self{ .allocator = allocator, .val = val, .next = null };
+            //stdout.print("Alloc: {*}\n", .{self}) catch |e| {};
             return self;
         }
 
@@ -27,15 +28,23 @@ pub fn LinkNode(comptime T: type) type {
             assert(self.*.allocator != undefined);
             const ret = try Self.create(self.*.allocator, v);
             ret.*.next = self;
-
             return ret;
         }
 
-        pub fn deinit(self: *Self) !void {
-            if (self.*.next != null) {
-                try self.*.next.?.*.deinit();
-            }
-            try self.*.allocator.*.destroy(self);
+        pub fn deinit(self: *Self) void {
+            //try stdout.print("Free {*}\n", .{self});
+            const allocator = self.*.allocator;
+
+            //stdout.print("LinkNode deiniting {*}\n", .{self}) catch |e| {};
+            allocator.*.destroy(self);
+            //var i: ?*Self = self;
+            // var j: ?*Self = null;
+
+            // while (i != null) : (i = j) {
+            //     j = i.?.*.next;
+            //     allocator.*.destroy(i.?);
+            //     stdout.print("Destroy: {*}\n", .{self}) catch |e| {};
+            // }
         }
     };
 }
@@ -130,6 +139,9 @@ const NodeMeta = struct {
     }
 
     pub fn deinit(self: *Self) void {
+        //if (self.childs != null) {
+        //    self.*.childs.?.*.deinit();
+        //}
         self.*.allocator.destroy(self);
     }
 };
@@ -149,7 +161,7 @@ fn prettyPrintTree(root: *NodeMeta, allocator: *Allocator) !void {
         while (i < indent) : (i += 1) {
             try stdout.print("  ", .{});
         }
-        try stdout.print("{} at {}\n", .{ current.*.element, current.*.position });
+        try stdout.print("{*}:{} at {}\n", .{ current, current.*.element, current.*.position });
         var cur_child = current.*.childs;
         while (cur_child != null) : (cur_child = cur_child.?.*.next) {
             assert(cur_child.?.*.val != undefined);
@@ -166,9 +178,16 @@ fn deinitTree(root: *NodeMeta, allocator: *Allocator) !void {
     try stack.append(root);
     while (stack.items.len != 0) {
         const current = stack.pop();
+        //try stdout.print("Deiniting: {*}\n", .{current});
         defer current.*.deinit();
         var cur_child = current.*.childs;
-        while (cur_child != null) : (cur_child = cur_child.?.*.next) {
+        while (cur_child != null) : ({
+            //try stdout.print("{*}=>{*}\n", .{ cur_child, cur_child.?.*.val });
+            const las = cur_child.?;
+            //try stdout.print("want to free {*}\n", .{las});
+            defer las.*.deinit();
+            cur_child = las.*.next;
+        }) {
             assert(cur_child.?.*.val != undefined);
             try stack.append(cur_child.?.*.val);
         }
@@ -185,6 +204,20 @@ fn link(father: *NodeMeta, son: *NodeMeta) callconv(.Inline) !void {
     son.*.father = father;
 }
 
+test "Link and Free" {
+    //try stdout.print("\n", .{});
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = &gpa.allocator;
+    var a = try NodeMeta.create(allocator, RegexElement{ .Literal = '1' }, null);
+    defer a.*.deinit();
+    var b = try NodeMeta.create(allocator, RegexElement{ .Literal = '1' }, null);
+    defer b.*.deinit();
+    try link(a, b);
+    a.*.childs.?.*.deinit();
+    //try stdout.print("{*}:{}\n", .{ b, b.*.element });
+}
+
 fn unlink(son: *NodeMeta) callconv(.Inline) !void {
     //try stdout.print("Unlink {*}:{} -> {*}:{}\n", .{ son.*.father.?, son.*.father.?.*.element, son, son.*.element });
     var i = son.*.father.?.*.childs;
@@ -199,6 +232,7 @@ fn unlink(son: *NodeMeta) callconv(.Inline) !void {
             } else {
                 last_i.?.*.next = i.?.*.next;
             }
+            i.?.*.deinit();
             son.*.father = null;
             return;
         }
@@ -231,8 +265,8 @@ fn insertReduce(
 ) !void {
     const current_parenthesis = last(chain_parenthesis.items);
     const priority_insert = try regexOperatorPriority(reduce_op);
-    while (true) {
-        const current = last(chain.items);
+    while (chain.*.items.len > 1) {
+        const current = last(chain.*.items);
         const father = current.*.father.?;
         const priority_current = try regexOperatorPriority(father.*.element.Operator);
         if (priority_insert < priority_current) {
@@ -429,7 +463,8 @@ test "Build up tree for regex" {
     const allocator = &gpa.allocator;
     defer _ = gpa.deinit();
     try stdout.print("\nStart building tree...\n", .{});
-    const t = try parseRegexToTree("(a|b)*ab", allocator);
+    //const t = try parseRegexToTree("b", allocator);
+    const t = try parseRegexToTree("[a-z]((a|b)*ab.)+", allocator);
     try stdout.print("Tree built!\n", .{});
     try prettyPrintTree(t, allocator);
     try deinitTree(t, allocator);
