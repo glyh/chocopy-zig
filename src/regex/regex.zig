@@ -72,7 +72,7 @@ const RegexOperator = enum {
     Concatenation,
     KleeneClosure, // '*'
     PositiveClosure, // '+'
-    Wildcard, // '.'
+    //Wildcard, // '.'
     Optional, // '?'
 };
 
@@ -345,6 +345,7 @@ fn readCharsetLiteral(
     char: u8,
     sigma: []bool,
 ) callconv(.Inline) !void {
+    //try stdout.print("wow!{}, {} {}\n", .{ @sizeOf(u8), 1 << (@sizeOf(u8) * 8), char });
     if (on_range_charset.*) {
         var i = last_in_charset.*.? + 1;
 
@@ -384,7 +385,7 @@ fn parseRegexToTree(expression: []const u8, allocator: *Allocator) !parseRegexTo
 
     var escaped = false;
 
-    var sigma = try allocator.alloc(bool, 1 << @sizeOf(u8));
+    var sigma = try allocator.alloc(bool, 1 << (@sizeOf(u8) * 8));
     defer allocator.free(sigma);
 
     var in_charset = false;
@@ -534,17 +535,51 @@ fn parseRegexToTree(expression: []const u8, allocator: *Allocator) !parseRegexTo
                     try insertUnaryOperator(&chain, RegexOperator.Optional, &last_node, allocator);
                 },
                 '.' => {
-                    const wildcard = try NodeMeta.create(allocator, RegexElement{ .Operator = RegexOperator.Wildcard }, pos);
-                    pos += 1;
+                    const new_layer = try NodeMeta.create(allocator, RegexElement{ .Operator = RegexOperator.Union }, null);
+
                     try insertBinaryOperator(
                         &chain,
                         &chain_parenthesis,
                         &last_node,
-                        wildcard,
+                        new_layer,
                         RegexOperator.Concatenation,
                         allocator,
                     );
-                    last_node = wildcard;
+
+                    try chain.append(new_layer);
+                    try chain_parenthesis.append(new_layer);
+
+                    //for (sigma) |_, index| {
+                    //    sigma[index] = false;
+                    //}
+
+                    const parenthesis_to_exit = chain_parenthesis.pop();
+                    for (sigma) |_, index| {
+                        const literal = try NodeMeta.create(allocator, RegexElement{ .Literal = @truncate(u8, index) }, pos);
+                        pos += 1;
+                        try insertBinaryOperator(
+                            &chain,
+                            &chain_parenthesis,
+                            &last_node,
+                            literal,
+                            RegexOperator.Union,
+                            allocator,
+                        );
+                    }
+                    while (chain.pop() != parenthesis_to_exit) {}
+                    last_node = new_layer;
+
+                    //const wildcard = try NodeMeta.create(allocator, RegexElement{ .Operator = RegexOperator.Wildcard }, pos);
+                    //pos += 1;
+                    //try insertBinaryOperator(
+                    //    &chain,
+                    //    &chain_parenthesis,
+                    //    &last_node,
+                    //    wildcard,
+                    //    RegexOperator.Concatenation,
+                    //    allocator,
+                    //);
+                    //last_node = wildcard;
                 },
                 '[' => {
                     const new_layer = try NodeMeta.create(allocator, RegexElement{ .Operator = RegexOperator.Union }, null);
@@ -559,7 +594,6 @@ fn parseRegexToTree(expression: []const u8, allocator: *Allocator) !parseRegexTo
                     );
                     last_node = null;
 
-                    //try link(last(chain.items), new_layer);
                     try chain.append(new_layer);
                     try chain_parenthesis.append(new_layer);
 
@@ -617,13 +651,13 @@ fn mergePositions(out: **std.ArrayList(u32), in: *std.ArrayList(u32), allocator:
 const NextMeta = struct {
     const Self = @This();
 
-    literal: u32,
+    literal: u8,
 
     next_position: ?*std.ArrayList(u32),
 
     allocator: *Allocator,
 
-    pub fn create(allocator: *Allocator, literal: u32, position: ?u32) !*Self {
+    pub fn create(allocator: *Allocator, literal: u8) !*Self {
         var self = try allocator.create(Self);
         self.* = NextMeta{
             .literal = literal,
@@ -635,16 +669,28 @@ const NextMeta = struct {
         return self;
     }
 
+    pub fn create_non_alloc(literal: u8) Self {
+        return NextMeta{
+            .literal = literal,
+
+            .next_position = null,
+
+            .allocator = undefined,
+        };
+    }
+
     pub fn deinit(self: *Self) void {
         self.*.allocator.destroy(self);
     }
 };
 
 fn linkNextSingle(pool: []NextMeta, from: u32, to: u32) callconv(.Inline) !void {
-    if (pool[from].next_position == null) {
-        pool[from].next_position = &(try std.ArrayList(u32).create(pool[from].allocator));
+    try stdout.print("{} -> {}\n", .{ from, to });
+    if (pool[from].next_position) |n| {
+        //try stdout.print("{*}\n", .{pool[from].next_position.?});
+        try n.append(to);
     } else {
-        pool[from].next_position = try pool[from].next_position.prepend(to);
+        pool[from].next_position = &(std.ArrayList(u32).init(pool[from].allocator));
     }
 }
 
@@ -676,78 +722,90 @@ fn dpTree(root: *NodeMeta, pos: u32, allocator: *Allocator) !void {
 
     var rhead: usize = queue.items.len - 1;
     var pool = try allocator.alloc(NextMeta, pos + 1);
+
     //linkNextMultiple
     while (rhead >= 0) : (rhead -= 1) {
-        const cur = queue.items[rhead];
-        switch (cur.element) {
+        const cur = &(queue.items[rhead]);
+        try stdout.print("cur: {}\n", .{cur.*.element});
+
+        cur.*.first_position = try allocator.create(std.ArrayList(u32));
+        cur.*.first_position.* = std.ArrayList(u32).init(allocator);
+        cur.*.last_position = try allocator.create(std.ArrayList(u32));
+        cur.*.last_position.* = std.ArrayList(u32).init(allocator);
+        switch (cur.*.element) {
             .Operator => {
-                switch (cur.element.Operator) {
+                switch (cur.*.element.Operator) {
                     .Union => {
-                        cur.first_position = &(std.ArrayList(u32).init(allocator));
-                        cur.last_position = &(std.ArrayList(u32).init(allocator));
-                        cur.nullable = false;
+                        cur.*.nullable = false;
                         var i = cur.*.childs;
-                        while (i != null) : (i = i.?.*.next) {
-                            try mergePositions(&cur.first_position, i.?.val.first_position, allocator);
-                            try mergePositions(&cur.last_position, i.?.val.last_position, allocator);
-                            cur.nullable = cur.nullable or i.?.val.nullable;
+                        while (i != null) : (i = i.?.next) {
+                            try mergePositions(&cur.*.first_position, i.?.val.first_position, allocator);
+                            try mergePositions(&cur.*.last_position, i.?.val.last_position, allocator);
+                            cur.*.nullable = cur.*.nullable or i.?.val.nullable;
                         }
                     },
                     .Concatenation => {
                         //chain is reversed!
                         var nullable_prefix = true;
                         var nullable_suffix = true;
-                        var i = cur.childs;
-                        var las: ?*LinkNode(u32) = null;
+                        var i = cur.*.childs;
+                        var las: ?*LinkNode(*NodeMeta) = null;
                         while (i != null) : ({
                             las = i;
                             i = i.?.next;
                         }) {
                             if (las != null) {
-                                linkNextMultiple(pool, i.?.val.last_position, las.?.val.first_position);
+                                try linkNextMultiple(pool, i.?.val.last_position, las.?.val.first_position);
                             }
                             if (nullable_suffix) {
                                 try mergePositions(&cur.*.last_position, i.?.val.last_position, allocator);
                                 nullable_suffix = nullable_suffix and i.?.val.nullable;
                             }
-                            stack.append(i.?);
+                            try stack.append(i.?.val);
                         }
 
                         while (stack.items.len != 0) {
                             var child = stack.pop();
                             if (nullable_prefix) {
-                                try mergePositions(&cur.*.first_position, cur_child.*.first_position, allocator);
+                                try mergePositions(&cur.*.first_position, child.first_position, allocator);
                                 nullable_prefix = nullable_prefix and cur.*.nullable;
                             }
                         }
                         cur.*.nullable = nullable_prefix;
                     },
                     .KleeneClosure => {
-                        var i_null = cur.childs;
-                        while (i_null) |i| : (i_null = i.next) {}
-                        unreachable;
-                        //cur.*
+                        var son = cur.*.childs.?;
+                        try mergePositions(&cur.*.first_position, son.val.first_position, allocator);
+                        try mergePositions(&cur.*.last_position, son.val.last_position, allocator);
+                        try linkNextMultiple(pool, cur.*.last_position, cur.*.first_position);
+                        cur.*.nullable = true;
                     },
                     .PositiveClosure => {
-                        unreachable;
+                        var son = cur.*.childs.?;
+                        try mergePositions(&cur.*.first_position, son.val.first_position, allocator);
+                        try mergePositions(&cur.*.last_position, son.val.last_position, allocator);
+                        try linkNextMultiple(pool, cur.*.last_position, cur.*.first_position);
+                        cur.*.nullable = false;
                     },
                     .Optional => {
-                        unreachable;
+                        var son = cur.*.childs.?;
+                        try mergePositions(&cur.*.first_position, son.val.first_position, allocator);
+                        try mergePositions(&cur.*.last_position, son.val.last_position, allocator);
+                        cur.*.nullable = true;
                     },
-                    .Wildcard => {
-                        cur.*.first_position = std.ArrayList(u32).init(allocator);
-                        cur.*.first_position.*.append(cur.*.position);
-                        cur.*.last_position = std.ArrayList(u32).init(allocator);
-                        cur.*.last_position.*.append(cur.*.position);
-                        cur.nullable = false;
-                    },
+                    //.Wildcard => {
+                    //    try cur.*.first_position.append(cur.*.position.?);
+                    //    try cur.*.last_position.append(cur.*.position.?);
+                    //    cur.*.nullable = false;
+                    //},
                 }
             },
             .Literal => {
-                cur.*.first_position = std.ArrayList(u32).init(allocator);
-                cur.*.first_position.*.append(cur.*.position);
-                cur.*.last_position = std.ArrayList(u32).init(allocator);
-                cur.*.last_position.*.append(cur.*.position);
+                //if (cur.*.position) |pos_cur| {
+                pool[cur.*.position.?] = NextMeta.create_non_alloc(cur.*.element.Literal);
+                //}
+                try cur.*.first_position.append(cur.*.position.?);
+                try cur.*.last_position.append(cur.*.position.?);
                 cur.*.nullable = false;
             },
         }
@@ -765,6 +823,7 @@ test "Build up tree for regex" {
             stdout.print("Error happens when deiniting tree.", .{}) catch |e2| {};
         };
     }
+    try stdout.print("pos: {}\n", .{ret.pos});
     try dpTree(ret.root, ret.pos, allocator);
     try prettyPrintTree(ret.root, allocator);
 }

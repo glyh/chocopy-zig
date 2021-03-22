@@ -183,7 +183,6 @@ pub fn main() !void {
         try link(i, try readUnsigned(), 0, allocator);
         try link(i, try readUnsigned(), 1, allocator);
     }
-    // try stdout.print("linked", .{});
 
     const n_accepting: u32 = try readUnsigned();
 
@@ -201,7 +200,6 @@ pub fn main() !void {
     while (i < n_accepting) : (i += 1) {
         accepting[try readUnsigned()] = true;
     }
-    //try stdout.print("Suceed in reading {}.", .{n_accepting});
 
     var queue = std.TailQueue(*SubsetMeta){};
     defer {
